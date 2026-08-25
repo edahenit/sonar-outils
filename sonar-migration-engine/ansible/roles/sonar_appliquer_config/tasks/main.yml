@@ -1,0 +1,181 @@
+---
+# Prompt step 12: reapplication of the configuration captured at step 7
+# (sonar_capture_config), now that the project exists under its final
+# target key (after sonar_renommer_cle).
+#
+# MANDATORY ORDER: permissions first — this is what makes the project
+# administrable again by the space's group
+# (sonar-<space_id>-managers); without it, a blocked central team would
+# have to intervene with an Administer System account for everything else.
+# Then quality gate, quality profiles, binding, tags.
+#
+# Deviation assumed (see sonar_capture_config): permissions reapplied via
+# add_group/add_user, not via apply_template — see that role's note.
+#
+# Idempotent: every 'add_*'/'select' call is already idempotent on the
+# SonarQube API side (adding an already-present permission, selecting an
+# already-selected quality gate, etc. are not errors); safely replayable
+# after a partial failure.
+
+- name: "Check input variables (assert)"
+  ansible.builtin.assert:
+    that:
+      - sonar_cle_cible is defined
+      - sonar_cle_cible is match('^[A-Za-z0-9_.:-]{1,400}$')
+      - sonar_run_id is defined and sonar_run_id | length > 0
+    fail_msg: "sonar_appliquer_config: sonar_cle_cible / sonar_run_id missing or invalid."
+    quiet: true
+
+- name: "Read the captured configuration"
+  ansible.builtin.slurp:
+    src: "{{ sonar_echange_local }}/config_capturee.json"
+  delegate_to: localhost
+  register: sonar_config_capturee_brute
+
+- name: "Decode the captured configuration"
+  ansible.builtin.set_fact:
+    sonar_config: "{{ sonar_config_capturee_brute.content | b64decode | from_json }}"
+
+- name: "The captured configuration must match this run"
+  ansible.builtin.assert:
+    that:
+      - sonar_config.run_id == sonar_run_id
+    fail_msg: >-
+      The configuration read from {{ sonar_echange_local }}/config_capturee.json
+      carries run_id '{{ sonar_config.run_id }}', expected '{{ sonar_run_id }}'
+      : inconsistent exchange file, do not reapply blindly.
+    quiet: true
+
+# --- 1. Permissions, groups then users, first -----------------
+
+- name: "Reapply group permissions"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/permissions/add_group"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      projectKey: "{{ sonar_cle_cible }}"
+      groupName: "{{ sonar_item.name }}"
+      permission: "{{ sonar_type_permission }}"
+    status_code: 200
+  no_log: true
+  loop: "{{ sonar_config.permissions_groupes | default({}) | dict2items(key_name='sonar_type_permission', value_name='sonar_groupe_liste') | subelements('sonar_groupe_liste', skip_missing=true) }}"
+  loop_control:
+    loop_var: sonar_couple
+  vars:
+    sonar_type_permission: "{{ sonar_couple[0].sonar_type_permission }}"
+    sonar_item: "{{ sonar_couple[1] }}"
+
+- name: "Reapply user permissions"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/permissions/add_user"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      projectKey: "{{ sonar_cle_cible }}"
+      login: "{{ sonar_item.login }}"
+      permission: "{{ sonar_type_permission }}"
+    status_code: 200
+  no_log: true
+  loop: "{{ sonar_config.permissions_utilisateurs | default({}) | dict2items(key_name='sonar_type_permission', value_name='sonar_utilisateur_liste') | subelements('sonar_utilisateur_liste', skip_missing=true) }}"
+  loop_control:
+    loop_var: sonar_couple
+  vars:
+    sonar_type_permission: "{{ sonar_couple[0].sonar_type_permission }}"
+    sonar_item: "{{ sonar_couple[1] }}"
+
+- name: "Confirm that at least one group holds 'admin' again"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/permissions/groups?projectKey={{ sonar_cle_cible | urlencode }}&permission=admin"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    status_code: 200
+  register: sonar_verif_admin_apres
+  no_log: true
+
+- name: "The project must be administrable again"
+  ansible.builtin.assert:
+    that:
+      - (sonar_verif_admin_apres.json.groups | default([]) | length) > 0
+        or (sonar_config.permissions_utilisateurs.admin | default([]) | length) > 0
+    fail_msg: >-
+      No group nor user holds the admin permission on
+      {{ sonar_cle_cible }} after reapplication: the project would remain
+      unadministrable by the space's team. Do not proceed, alert the
+      central team.
+
+# --- 2. Quality gate ---------------------------------------------------
+
+- name: "Reapply the quality gate"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/qualitygates/select"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      projectKey: "{{ sonar_cle_cible }}"
+      gateName: "{{ sonar_config.quality_gate.qualityGate.name }}"
+    status_code: 200
+  no_log: true
+  when: sonar_config.quality_gate is not none and sonar_config.quality_gate.qualityGate is defined
+
+# --- 3. Quality profiles ------------------------------------------------
+
+- name: "Reapply the quality profiles"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/qualityprofiles/add_project"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      project: "{{ sonar_cle_cible }}"
+      qualityProfile: "{{ sonar_profil.name }}"
+      language: "{{ sonar_profil.language }}"
+    status_code: 200
+  no_log: true
+  loop: "{{ sonar_config.quality_profiles | default([]) }}"
+  loop_control:
+    loop_var: sonar_profil
+
+# --- 4. DevOps binding (endpoint specific to the forge type — see a-verifier.md) ---
+
+- name: "Reapply the DevOps binding"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/alm_settings/set_{{ sonar_config.binding.alm | default('gitlab') }}_binding"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      project: "{{ sonar_cle_cible }}"
+      almSetting: "{{ sonar_config.binding.almSetting | default('') }}"
+      repository: "{{ sonar_config.binding.repository | default('') }}"
+    status_code: 200
+  no_log: true
+  ignore_errors: true  # endpoint specific to the forge type, not confirmed — see docs/a-verifier.md
+  when: sonar_config.binding is not none
+
+# --- 5. Tags --------------------------------------------------------------
+
+- name: "Reapply the tags"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/project_tags/set"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      project: "{{ sonar_cle_cible }}"
+      tags: "{{ sonar_config.tags | default([]) | join(',') }}"
+    status_code: 200
+  no_log: true
+  when: sonar_config.tags | default([]) | length > 0
+
+# Portfolios: not reapplied (not captured — see sonar_capture_config).

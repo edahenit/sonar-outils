@@ -1,0 +1,4 @@
+---
+# Expected variables: sonar_cle_cible, sonar_projet_cible_id (extra-vars —
+# the INTERNAL id captured by the authorization check, not just the key,
+# see root README § substitution); sonar_url, sonar_token (central host).

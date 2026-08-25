@@ -1,0 +1,51 @@
+---
+# Common, typed variables for every step. Values specific to a given
+# migration (keys, run_id, source host) are passed as extra-vars by the
+# pipeline (--extra-vars), never hardcoded here — see ansible/README.md.
+
+# Compute Engine task tracking (export, import) — see docs/suivi_taches_ce.md.
+sonar_ce_intervalle_secondes: 10
+sonar_ce_timeout_secondes: 1800          # 30 min: a large export/import can take a while
+sonar_ce_tentatives: "{{ (sonar_ce_timeout_secondes / sonar_ce_intervalle_secondes) | int }}"
+
+# Preflight checks.
+sonar_espace_disque_minimum_mo: 2048
+
+# Dump exchange paths — imposed by SonarQube (Project Move), not a local
+# convention.
+sonar_repertoire_export: "{{ sonar_home }}/data/governance/project_dumps/export"
+sonar_repertoire_import: "{{ sonar_home }}/data/governance/project_dumps/import"
+
+# Prompt's uncertainty point #1 (see docs/a-verifier.md): whether the
+# imported archive requires an already-created, blank target project, or
+# whether the import creates the project itself. A parameter, never a
+# supposition hardcoded into the code.
+sonar_create_placeholder_project: true
+
+# Central host identifier in the dynamic inventory — see
+# ansible/inventaire/depuis_instances.py. NOT assumed implicitly anywhere
+# else: every role that delegates to the central instance reads this
+# variable.
+sonar_centrale_host: centrale
+
+# Token for THIS instance, resolved by indirection: every host carries,
+# via the dynamic inventory, the NAME of its protected variable
+# (sonar_variable_token); its VALUE is read from the pipeline's environment
+# at call time, never hardcoded nor passed as an extra-var on the command
+# line. 'lookup' runs on the controller (the GitLab CI runner), where these
+# environment variables actually exist.
+sonar_token: "{{ lookup('env', hostvars[inventory_hostname].sonar_variable_token) }}"
+
+# System account SonarQube runs as — to be confirmed per environment
+# (varies by installation), used by sonar_transfert so the SonarQube
+# process can read the deposited archive.
+sonar_utilisateur_service: sonarqube
+
+# Local (controller-side) exchange directory for state that must cross the
+# boundary between two separate ansible-playbook invocations of the
+# pipeline (configuration capture before deletion, then reapplication
+# after import — both run in the SAME GitLab CI 'executer' job, hence on
+# the same runner, but remain two distinct ansible-playbook calls). Derived
+# solely from sonar_run_id: no extra linking variable to pass between
+# roles.
+sonar_echange_local: "/tmp/migration-{{ sonar_run_id | regex_replace('/', '-') }}"

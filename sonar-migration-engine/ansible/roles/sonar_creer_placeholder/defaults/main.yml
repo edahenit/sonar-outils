@@ -1,0 +1,4 @@
+---
+# Expected variables: sonar_cle_source (extra-var, the key under which the
+# placeholder must be created — NOT the target key, see top of
+# tasks/main.yml).

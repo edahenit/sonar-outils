@@ -1,0 +1,283 @@
+# Privileged pipeline for the self-service SonarQube migration.
+#
+# This file is loaded by sonar-migration-requests via its
+# Settings -> CI/CD -> "CI/CD configuration file" setting (see the
+# monorepo's root README). The jobs below therefore run IN THE CONTEXT of
+# the sonar-migration-requests repository ($CI_PROJECT_ID, $CI_COMMIT_SHA,
+# the default clone, etc. refer to that repository), even though their
+# definition lives here, in the engine repository — this is precisely
+# what neutralizes the "modify the pipeline in the same MR as my request"
+# threat.
+#
+# Since the jobs run in the requests repository's context, they have no
+# access by default to this repository's (the engine's) code nor its
+# inventory. Each job therefore explicitly clones sonar-migration-engine,
+# authenticated by CI_JOB_TOKEN (automatic, specific to each job, with no
+# scope beyond what "Token Access" allows) — NOT by an admin token.
+# GitLab prerequisite, to set up once: on the sonar-migration-engine
+# project, Settings -> CI/CD -> Token Access -> add sonar-migration-requests
+# to the list of projects allowed to use their CI_JOB_TOKEN to read this
+# repository. This is the setting that lets the "valider" stage work with
+# NO admin token at all (see "token exfiltration" threat, root README):
+# CI_JOB_TOKEN only grants a read-only clone of sonar-migration-engine,
+# nothing more, and it is automatically revoked at the end of the job.
+#
+# Reminder of the underlying rule (root README, § security): no security
+# decision is based on a job environment variable. This file NEVER reads
+# CI_COMMIT_AUTHOR; the requester's identity is resolved by
+# migration.cli habiliter via the GitLab API (gitlab_client.py), which
+# itself looks up the merge request associated with $CI_COMMIT_SHA
+# server-side.
+
+variables:
+  ENGINE_CHEMIN: "_engine"
+  # Generous retention window: the "executer" job is manual and can be
+  # launched weeks after the "habiliter" job. The artifact is only a
+  # caching convenience for the same pipeline — the source of truth
+  # remains the journal committed to sonar-migration-runs (see the
+  # "habiliter" job below), so an expired artifact is never blocking.
+  ETAT_ARTEFACT_EXPIRATION: "180 days"
+
+stages:
+  - valider
+  - habiliter
+  - preflight
+  - executer
+  - rapport
+
+# --- Shared anchor: clone the engine repository via CI_JOB_TOKEN ---------------
+.avec_moteur: &avec_moteur
+  before_script:
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/groupe/sonar-migration-engine.git" "${ENGINE_CHEMIN}"
+    # TO VERIFY: exact GitLab group path once the 3 repositories are
+    # created (see scripts/split-repos.sh) — this clone assumes "groupe/"
+    # as the namespace, to adjust to the real value.
+    - python3 -m venv "${ENGINE_CHEMIN}/.venv"
+    - "${ENGINE_CHEMIN}/.venv/bin/pip install -q -e ${ENGINE_CHEMIN}"
+  variables:
+    PYTHONPATH: "${ENGINE_CHEMIN}/src"
+
+# ============================================================================
+# STAGE 1 — valider: schema + consistency, NO TOKEN AT ALL.
+# ============================================================================
+# Runs on any branch pipeline triggered by a push to main (i.e. after a
+# merge). Replays the (optional) local validation done upstream by the
+# author: this one, executed here server-side, is the only one that
+# counts.
+valider:
+  stage: valider
+  <<: *avec_moteur
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+  tags: [migration-sonar]  # dedicated, tagged self-hosted runners (H6)
+  script:
+    - >
+      "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli valider-commit
+      --depot-demandes "${CI_PROJECT_DIR}"
+      --commit-sha "${CI_COMMIT_SHA}"
+      --inventaire "${ENGINE_CHEMIN}/inventaire/instances.yml"
+  # No protected variable is declared on this job: even though the
+  # GitLab group holding sonar-migration-engine makes them available to
+  # the whole pipeline, this job never reads them — see
+  # cli.commande_valider_commit. A failure here shows up in the MR's
+  # pipeline status; no need (and no way, without a token) to add a
+  # comment for it.
+
+# ============================================================================
+# STAGE 2 — habiliter: identity + authorization check. WITH tokens.
+# ============================================================================
+habiliter:
+  stage: habiliter
+  <<: *avec_moteur
+  needs: ["valider"]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+  tags: [migration-sonar]
+  resource_group: "migration-${CI_COMMIT_SHA}"
+  # resource_group (native to GitLab CI) ensures mutual exclusion per
+  # run: this is the answer to the environment's "uniqueness lock per
+  # target project" — no hand-rolled lock, GitLab queues any concurrent
+  # pipeline on the same resource.
+  script:
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/groupe/sonar-migration-runs.git" _runs
+    - >
+      "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli habiliter
+      --depot-demandes "${CI_PROJECT_DIR}"
+      --commit-sha "${CI_COMMIT_SHA}"
+      --depot-runs "${CI_PROJECT_DIR}/_runs"
+      --inventaire "${ENGINE_CHEMIN}/inventaire/instances.yml"
+      --gitlab-base-url "${CI_SERVER_URL}"
+      --projet-gitlab-id "${CI_PROJECT_ID}"
+      --fichier-etat "${CI_PROJECT_DIR}/_etat.env"
+    # 'habiliter's exit code (0 = AUTHZ_PASSED, 1 = AUTHZ_REJECTED) is
+    # also this job's exit code: a refusal fails this job, which
+    # naturally prevents the following stages from starting (implicit
+    # needs per stage). The explanatory MR comment has already been
+    # posted before the job ends — the job failure is only an additional
+    # signal.
+  artifacts:
+    paths:
+      - _runs/journal/
+    expire_in: "${ETAT_ARTEFACT_EXPIRATION}"
+    reports:
+      # RUN_ID, DEMANDE_FICHIER, MR_IID, SONAR_PROJET_CIBLE_ID become job
+      # variables for any following job that declares 'needs' on this one
+      # (native GitLab CI mechanism). Not written on refusal (see
+      # cli.commande_habiliter): a following job can therefore never
+      # start by mistake with a refusal state taken for a success.
+      dotenv: _etat.env
+  # Secrets: GITLAB_API_TOKEN + one SONAR_SRC_<ID>_TOKEN per active source
+  # instance + SONAR_CENTRALE_TOKEN, all protected/masked, carried by the
+  # GitLab group containing sonar-migration-engine (never sonar-migration-
+  # requests nor sonar-migration-runs). Naming convention: see root
+  # README, § "protected variable naming convention". No GitLab SSO
+  # provider name to configure: every account here carries exactly one
+  # external identity, so ClientGitLab reads it directly — see
+  # gitlab_client.py.
+
+# ============================================================================
+# STAGE 3 — preflight: server preflight checks (Ansible, content delivered in batch 4).
+# ============================================================================
+preflight:
+  stage: preflight
+  <<: *avec_moteur
+  needs: ["habiliter"]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+  tags: [migration-sonar]
+  resource_group: "migration-${CI_COMMIT_SHA}"
+  script:
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/groupe/sonar-migration-runs.git" _runs
+    # The runners have no network path to the SonarQube hosts (SSH
+    # blocked): 'preflight' is launched as an AWX job template and polled
+    # to completion instead of running 'ansible-playbook' locally. AWX
+    # holds its own SSH credentials and inventory for the Sonar hosts —
+    # see docs/installation.md, step 8. The role itself (ansible/roles/
+    # sonar_preflight) is unchanged: it observes the facts (versions,
+    # plugins, disk space, target project state...) and fails cleanly
+    # (assert) at the first gap; only AFTER the AWX job succeeds does
+    # this job decide and record PREFLIGHT_OK — a failed/errored AWX job
+    # fails this job without ever calling 'enregistrer', which leaves the
+    # run at AUTHZ_PASSED (last confirmed state), resumable.
+    - >
+      "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli lancer-gabarit
+      --gabarit preflight
+      --extra-vars "sonar_run_id=${RUN_ID} sonar_cle_source=${SONAR_CLE_SOURCE} sonar_cle_cible=${SONAR_CLE_CIBLE} sonar_source_host=${SONAR_SOURCE_HOST}"
+    - >
+      "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli enregistrer
+      --depot-runs "${CI_PROJECT_DIR}/_runs" --run-id "${RUN_ID}"
+      --etat PREFLIGHT_OK --acteur pipeline
+  artifacts:
+    paths: ["_runs/journal/"]
+    expire_in: "${ETAT_ARTEFACT_EXPIRATION}"
+    reports:
+      dotenv: _etat.env  # relayed as-is (RUN_ID, DEMANDE_FICHIER, MR_IID, SONAR_PROJET_CIBLE_ID)
+  # Secrets: AWX_BASE_URL + AWX_API_TOKEN (protected/masked, same group as
+  # the other tokens — see root README) to reach the AWX controller. No
+  # SonarQube token here: those are AWX's own credentials now, attached
+  # to its job templates, never passed through this job.
+
+# ============================================================================
+# STAGE 4 — executer: manual, reserved for the central team. Ansible content
+# delivered in batch 4 (steps 5 to 12: export, transfer, capture, deletion,
+# placeholder, import, rename, configuration reapplication).
+# ============================================================================
+executer:
+  stage: executer
+  <<: *avec_moteur
+  needs: ["preflight"]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      when: manual
+  tags: [migration-sonar]
+  resource_group: "migration-${CI_COMMIT_SHA}"
+  environment:
+    name: migration-production
+    # Protect this environment (Settings -> CI/CD -> Environments) with
+    # the list of central team members allowed to approve: it is this
+    # setting, not 'rules:', that keeps a project team from launching
+    # this job even if they could see the "Run" button.
+  script:
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/groupe/sonar-migration-runs.git" _runs
+    # State resumed from the journal (the source of truth, rechecked by
+    # each role before acting — see sonar_supprimer_cible,
+    # sonar_renommer_cle), never from the artifact/dotenv alone: that is
+    # only a convenience to avoid asking again for
+    # RUN_ID/MR_IID/SONAR_PROJET_CIBLE_ID on every job.
+    #
+    # The runners have no network path to the SonarQube hosts (SSH
+    # blocked): each step below launches an AWX job template of the same
+    # name as the Ansible tag it replaces, and polls it to completion —
+    # see migration.awx_client and docs/installation.md, step 8. Ansible
+    # itself (ansible/site.yml and the roles) is unchanged, only launched
+    # remotely instead of locally.
+    - export EXTRA_VARS="sonar_run_id=${RUN_ID} sonar_cle_source=${SONAR_CLE_SOURCE} sonar_cle_cible=${SONAR_CLE_CIBLE} sonar_source_host=${SONAR_SOURCE_HOST} sonar_projet_cible_id=${SONAR_PROJET_CIBLE_ID}"
+    # One (AWX job template, resulting state) pair per prompt step 5-12,
+    # in the exact order of machine_etats.ETATS_SEQUENCE — a single
+    # source for this sequence instead of one hand-written pair of lines
+    # per step, so a future addition/reorder cannot update the template
+    # name on one side and forget the state on the other. 'set -e' makes
+    # the loop stop at the first failing command, same as GitLab CI's
+    # default behavior across separate script lines: a state is therefore
+    # never logged DONE while the corresponding action has not actually
+    # succeeded (both an AWX job failure and lancer-gabarit's own exit
+    # code — see cli.commande_lancer_gabarit — stop the loop the same
+    # way). On a failure at any step, this job fails and the run stays at
+    # the last confirmed state — recovery in the runbook, anti-rollback
+    # guard in machine_etats.py.
+    - |
+      set -e
+      # --- Point of no return: everything up to TARGET_CAPTURED is reversible, nothing from supprimer_cible on. ---
+      for etape in export:EXPORTED transfert:TRANSFERRED capture_config:TARGET_CAPTURED \
+                   supprimer_cible:TARGET_DELETED creer_placeholder:PLACEHOLDER_CREATED \
+                   import:IMPORTED renommer_cle:KEY_RENAMED appliquer_config:CONFIG_APPLIED; do
+        etiquette="${etape%%:*}"
+        etat="${etape##*:}"
+        "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli lancer-gabarit --gabarit "${etiquette}" --extra-vars "${EXTRA_VARS}"
+        "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli enregistrer --depot-runs "${CI_PROJECT_DIR}/_runs" --run-id "${RUN_ID}" --etat "${etat}" --acteur pipeline
+      done
+      "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli enregistrer --depot-runs "${CI_PROJECT_DIR}/_runs" --run-id "${RUN_ID}" --etat DONE --acteur pipeline
+  artifacts:
+    paths: ["_runs/journal/"]
+    expire_in: "${ETAT_ARTEFACT_EXPIRATION}"
+    reports:
+      dotenv: _etat.env
+  # Secrets: AWX_BASE_URL + AWX_API_TOKEN, same as the 'preflight' job. No
+  # SonarQube token here either — AWX holds its own.
+
+# ============================================================================
+# STAGE 5 — rapport: publishes the final report, success or failure.
+# ============================================================================
+rapport:
+  stage: rapport
+  <<: *avec_moteur
+  needs: ["executer"]
+  # 'when: always' is essential here: without it, a failure of 'executer'
+  # would keep this job from starting (GitLab CI's default behavior), and
+  # no failure report would ever be published. A single rule: two rules
+  # with the same 'if:' and different 'when:' do not work as an "either
+  # one or the other" — GitLab CI stops at the first matching rule, the
+  # second would never be reached.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "push"'
+      when: always
+  tags: [migration-sonar]
+  script:
+    - git clone --depth 1 "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/groupe/sonar-migration-runs.git" _runs
+    - >
+      "${ENGINE_CHEMIN}/.venv/bin/python" -m migration.cli rapport-final
+      --depot-demandes "${CI_PROJECT_DIR}"
+      --demande-fichier "${DEMANDE_FICHIER}"
+      --depot-runs "${CI_PROJECT_DIR}/_runs"
+      --run-id "${RUN_ID}"
+      --gitlab-base-url "${CI_SERVER_URL}"
+      --projet-gitlab-id "${CI_PROJECT_ID}"
+      --mr-iid "${MR_IID}"
+  # RUN_ID, DEMANDE_FICHIER and MR_IID: propagated from the 'habiliter'
+  # job via the dotenv report (_etat.env), relayed from job to job — see
+  # the 'habiliter' job's note above. If this file has expired or does
+  # not exist (a very delayed resumption, beyond the retention window),
+  # these variables would be missing: to be covered by the runbook
+  # (batch 5), 'rapport-final' could then rederive them from
+  # _runs/journal (run_id) and a fresh GitLab resolution call (mr_iid), at
+  # the cost of one more API call.

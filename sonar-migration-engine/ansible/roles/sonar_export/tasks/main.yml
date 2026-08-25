@@ -1,0 +1,81 @@
+---
+# Prompt step 5: export from the source.
+#
+# api/project_dump/export and the exact shape of its trigger response are
+# not covered by the functional documentation — see docs/a-verifier.md,
+# point 3. Implemented with the most likely behavior (POST, 'project'
+# parameter, response carrying the task identifier under 'task.id' or
+# 'taskId' depending on the version); to confirm on a test instance before
+# any deployment.
+
+# Idempotent by relaunch: SonarQube overwrites the previous zip on every
+# successful export (the prompt says so explicitly for the next step);
+# retriggering an export after a failure or a tracking timeout is
+# therefore harmless — at worst one more export.
+
+- name: "Check input variables (assert)"
+  ansible.builtin.assert:
+    that:
+      - sonar_cle_source is defined
+      - sonar_cle_source is match('^[A-Za-z0-9_.:-]{1,400}$')
+      - sonar_url is defined and sonar_url | length > 0
+      - sonar_home is defined and sonar_home | length > 0
+    fail_msg: "sonar_export: missing or invalid input variables."
+    quiet: true
+
+- name: "Check that the export directory exists"
+  ansible.builtin.stat:
+    path: "{{ sonar_repertoire_export }}"
+  register: sonar_stat_repertoire_export
+
+- name: "The export directory must exist and be a directory"
+  ansible.builtin.assert:
+    that:
+      - sonar_stat_repertoire_export.stat.exists
+      - sonar_stat_repertoire_export.stat.isdir
+    fail_msg: >-
+      {{ sonar_repertoire_export }} is missing or is not a directory on
+      {{ inventory_hostname }}: SonarQube only creates it on the first
+      governance export. Check the Project Move installation.
+
+- name: "Trigger the project export"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/project_dump/export"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      project: "{{ sonar_cle_source }}"
+    status_code: [200, 202]
+  register: sonar_export_declenchement
+  no_log: true
+
+- name: "Wait for the export Compute Engine task to finish"
+  ansible.builtin.include_role:
+    name: sonar_attendre_tache_ce
+  vars:
+    sonar_ce_task_url_base: "{{ sonar_url }}/api/ce/task"
+    sonar_ce_task_id: >-
+      {{ sonar_export_declenchement.json.task.id | default(sonar_export_declenchement.json.taskId) }}
+    sonar_ce_token: "{{ sonar_token }}"
+
+- name: "Check that the expected archive was actually produced"
+  ansible.builtin.stat:
+    path: "{{ sonar_repertoire_export }}/{{ sonar_cle_source }}.zip"
+    checksum_algorithm: sha256
+  register: sonar_stat_archive_export
+
+- name: "The archive must exist after a SUCCESS export"
+  ansible.builtin.assert:
+    that:
+      - sonar_stat_archive_export.stat.exists
+    fail_msg: >-
+      The Compute Engine task succeeded but {{ sonar_repertoire_export }}/{{ sonar_cle_source }}.zip
+      could not be found: the expected file name (<key>.zip) is an
+      assumption — see docs/a-verifier.md, point 3, to confirm as a
+      priority if this failure recurs.
+
+- name: "Record the produced archive's fingerprint (traceability, not passed to another role)"
+  ansible.builtin.debug:
+    msg: "Export {{ sonar_cle_source }}: sha256={{ sonar_stat_archive_export.stat.checksum }}"

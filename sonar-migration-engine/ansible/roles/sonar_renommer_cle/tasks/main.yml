@@ -1,0 +1,93 @@
+---
+# Prompt step 11: rename the source key to the target key.
+#
+# Idempotent BY DESIGN, not by accident: the prompt (§6) explicitly
+# identifies this case as the trickiest of the whole sequence — a rename
+# failure after a successful import leaves the history under the source
+# key, a functional but inconsistent project relative to the DevOps
+# space. The correct behavior is to replay 'api/projects/update_key'
+# (idempotent); this role FIRST checks the current state to know whether
+# there is still something to do, rather than calling the API blindly on
+# every resumption.
+
+- name: "Check input variables (assert)"
+  ansible.builtin.assert:
+    that:
+      - sonar_cle_source is defined
+      - sonar_cle_source is match('^[A-Za-z0-9_.:-]{1,400}$')
+      - sonar_cle_cible is defined
+      - sonar_cle_cible is match('^[A-Za-z0-9_.:-]{1,400}$')
+    fail_msg: "sonar_renommer_cle: sonar_cle_source / sonar_cle_cible missing or invalid."
+    quiet: true
+
+- name: "Look up the target key's current state (before any rename)"
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/rechercher_projet.yml"
+  vars:
+    sonar_cle_recherche: "{{ sonar_cle_cible }}"
+    sonar_recherche_nom: "Look up the target key's current state (before any rename)"
+
+- name: "Remember the target key lookup"
+  ansible.builtin.set_fact:
+    sonar_composants_cle_cible: "{{ sonar_composants_trouves }}"
+
+- name: "Look up the source key's current state (before any rename)"
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/rechercher_projet.yml"
+  vars:
+    sonar_cle_recherche: "{{ sonar_cle_source }}"
+    sonar_recherche_nom: "Look up the source key's current state (before any rename)"
+
+- name: "Remember the source key lookup"
+  ansible.builtin.set_fact:
+    sonar_composants_cle_source: "{{ sonar_composants_trouves }}"
+
+- name: "Determine whether the rename is still to be done"
+  vars:
+    sous_cle_cible: "{{ sonar_composants_cle_cible }}"
+    sous_cle_source: "{{ sonar_composants_cle_source }}"
+  ansible.builtin.set_fact:
+    sonar_deja_renomme: "{{ (sous_cle_cible | length == 1) and (sous_cle_cible[0].lastAnalysisDate is defined) }}"
+    sonar_source_encore_presente: "{{ sous_cle_source | length == 1 }}"
+
+- name: "Neither the source key nor the target key matches a project: anomaly"
+  ansible.builtin.fail:
+    msg: >-
+      Neither {{ sonar_cle_source }} nor {{ sonar_cle_cible }} matches a
+      project on the central instance: inconsistent state, to be
+      diagnosed by hand before any resumption (see runbook, IMPORTED state).
+  when: not sonar_deja_renomme and not sonar_source_encore_presente
+
+- name: "Rename the source key to the target key"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/projects/update_key"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    body_format: form-urlencoded
+    body:
+      from: "{{ sonar_cle_source }}"
+      to: "{{ sonar_cle_cible }}"
+    status_code: 200
+  no_log: true
+  when: not sonar_deja_renomme and sonar_source_encore_presente
+
+- name: "Confirm that the target key now carries the imported history"
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/rechercher_projet.yml"
+  vars:
+    sonar_cle_recherche: "{{ sonar_cle_cible }}"
+    sonar_recherche_nom: "Confirm that the target key now carries the imported history"
+
+- name: "The target key must now carry the imported analysis"
+  vars:
+    composants: "{{ sonar_composants_trouves }}"
+  ansible.builtin.assert:
+    that:
+      - composants | length == 1
+      - composants[0].lastAnalysisDate is defined
+    fail_msg: >-
+      The rename was attempted but {{ sonar_cle_cible }} still has no
+      analysis. Most likely cause: the target key was not free (a
+      collision detected late, or a project recreated in the meantime).
+      Replay this role after resolving the collision — never delete the
+      source project in response to this failure (guard: see
+      machine_etats.interdire_suppression_projet_importe on the Python
+      side).

@@ -1,0 +1,85 @@
+---
+# Main playbook. One step of the sequence (prompt §4) = one tag = one role
+# of the same name. The pipeline invokes each step in isolation
+# (`ansible-playbook site.yml --tags <step> --extra-vars @...`), never the
+# whole playbook at once: it is the pipeline that decides, between two
+# steps, to record the transition in the journal (see ci/pipeline.yml and
+# root README, § GitLab CI / Ansible split).
+#
+# Extra-vars common to every step (typed, checked by an 'assert' at the top
+# of each role):
+#   sonar_run_id      : run identifier (see modele.Demande.identifiant)
+#   sonar_cle_source   : project key on the source instance
+#   sonar_cle_cible     : target project key on the central instance
+#   sonar_source_host    : Ansible host name of the source instance
+#                           (see ansible/inventaire/depuis_instances.py)
+#
+# Tokens: never as extra-vars on the command line (visible in the runner's
+# process list). Each role reads them via
+# `sonar_token` (group_vars/all.yml), resolved per host by indirection —
+# `lookup('env', hostvars[inventory_hostname].sonar_variable_token)` — the
+# pipeline exports the right environment variable for each instance's
+# token just before invoking ansible-playbook (see ci/pipeline.yml).
+
+- name: Preflight checks (source and central)
+  hosts: "{{ sonar_source_host }},{{ sonar_centrale_host }}"
+  gather_facts: true  # needed: ansible_mounts, for disk space
+  tags: [preflight]
+  roles:
+    - sonar_preflight
+
+- name: Export from the source
+  hosts: "{{ sonar_source_host }}"
+  gather_facts: false
+  tags: [export]
+  roles:
+    - sonar_export
+
+- name: Transfer the archive to the central instance
+  hosts: "{{ sonar_source_host }}"
+  gather_facts: false
+  tags: [transfert]
+  roles:
+    - sonar_transfert
+
+- name: Capture the portal project's configuration (before destruction)
+  hosts: "{{ sonar_centrale_host }}"
+  gather_facts: false
+  tags: [capture_config]
+  roles:
+    - sonar_capture_config
+
+- name: Delete the portal project — POINT OF NO RETURN
+  hosts: "{{ sonar_centrale_host }}"
+  gather_facts: false
+  tags: [supprimer_cible]
+  roles:
+    - sonar_supprimer_cible
+
+- name: Create the blank project holding the source key
+  hosts: "{{ sonar_centrale_host }}"
+  gather_facts: false
+  tags: [creer_placeholder]
+  roles:
+    - sonar_creer_placeholder
+
+- name: Import the archive
+  hosts: "{{ sonar_centrale_host }}"
+  gather_facts: false
+  tags: [import]
+  roles:
+    - sonar_import
+
+- name: Rename the source key to the target key
+  hosts: "{{ sonar_centrale_host }}"
+  gather_facts: false
+  tags: [renommer_cle]
+  roles:
+    - sonar_renommer_cle
+
+- name: Reapply the captured configuration
+  hosts: "{{ sonar_centrale_host }}"
+  gather_facts: false
+  tags: [appliquer_config]
+  roles:
+    - sonar_appliquer_config

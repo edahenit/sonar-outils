@@ -1,0 +1,146 @@
+---
+# Preflight checks (prompt step 4). This role OBSERVES facts (Sonar facts,
+# disk facts); it makes no authorization decision — that was already
+# rendered by the Python check (batch 2) at the previous step. A failing
+# 'assert' here fails the GitLab CI 'preflight' job, which logs
+# PREFLIGHT_OK or the absence of that state depending on the exit code
+# (see ci/pipeline.yml) — the pipeline decides and traces, this role only
+# observes and refuses to continue if a fact is incompatible.
+#
+# Idempotent: read-only from end to end (no 'uri' task in this role has a
+# side effect), safely replayable, including after an already-successful
+# 'preflight'.
+
+- name: "Check input variables (assert)"
+  ansible.builtin.assert:
+    that:
+      - sonar_cle_source is defined
+      - sonar_cle_source is match('^[A-Za-z0-9_.:-]{1,400}$')
+      - sonar_cle_cible is defined
+      - sonar_cle_cible is match('^[A-Za-z0-9_.:-]{1,400}$')
+      - sonar_url is defined and sonar_url | length > 0
+      - sonar_home is defined and sonar_home | length > 0
+    fail_msg: >-
+      sonar_preflight: missing or invalid input variables
+      (sonar_cle_source, sonar_cle_cible expected as extra-vars; sonar_url,
+      sonar_home expected from the dynamic inventory).
+    quiet: true
+  run_once: false  # the assert covers per-host vars (sonar_url, sonar_home): must run on EVERY host of the play
+
+# --- Disk space, per host -----------------------------------------------
+
+- name: "Check available disk space under {{ sonar_home }}"
+  vars:
+    # The most specific mount point that prefixes sonar_home. Ansible does
+    # not directly provide "the space for this directory": the right mount
+    # point is recovered among those reported by the 'setup' module.
+    sonar_montages_correspondants: >-
+      {{ ansible_mounts
+         | selectattr('mount', 'defined')
+         | selectattr('mount', 'in', sonar_home)
+         | sort(attribute='mount', reverse=true) }}
+    sonar_montage_retenu: "{{ sonar_montages_correspondants[0] if sonar_montages_correspondants | length > 0 else None }}"
+  ansible.builtin.assert:
+    that:
+      - sonar_montage_retenu is not none
+      - (sonar_montage_retenu.size_available / 1048576) | int >= sonar_espace_disque_minimum_mo | int
+    fail_msg: >-
+      Insufficient disk space under {{ sonar_home }} on {{ inventory_hostname }}:
+      {{ (sonar_montage_retenu.size_available / 1048576) | int if sonar_montage_retenu is not none else 'mount point not found' }} MB
+      available, {{ sonar_espace_disque_minimum_mo }} MB required.
+    success_msg: "Sufficient disk space on {{ inventory_hostname }}."
+
+# --- Version, edition, plugins (api/system/info) ---------------------------
+# Response structure not confirmed on 2026.1.2 — see docs/a-verifier.md.
+
+- name: "Query api/system/info"
+  ansible.builtin.uri:
+    url: "{{ sonar_url }}/api/system/info"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ sonar_token }}"
+    status_code: 200
+  register: sonar_info_reponse
+  no_log: true
+
+- name: "Extract version, edition, plugins for this host"
+  ansible.builtin.set_fact:
+    sonar_version_hote: "{{ sonar_info_reponse.json.System.Version | default('UNKNOWN') }}"
+    sonar_edition_hote: "{{ sonar_info_reponse.json.System.Edition | default('UNKNOWN') }}"
+    sonar_plugins_hote: "{{ sonar_info_reponse.json.Plugins | default({}) }}"
+
+- name: "Check that the edition is Enterprise or higher"
+  ansible.builtin.assert:
+    that:
+      - "'Enterprise' in sonar_edition_hote or 'Datacenter' in sonar_edition_hote or 'Data Center' in sonar_edition_hote"
+    fail_msg: >-
+      Edition '{{ sonar_edition_hote }}' on {{ inventory_hostname }}: Enterprise
+      or higher is required for Project Move.
+
+# --- Cross-checks (once only, using both hosts' facts) ---------------------
+
+- name: "Compare version, edition, and plugins between the source and the central instance"
+  run_once: true
+  delegate_to: localhost
+  vars:
+    v_source: "{{ hostvars[sonar_source_host].sonar_version_hote }}"
+    v_centrale: "{{ hostvars[sonar_centrale_host].sonar_version_hote }}"
+    p_source: "{{ hostvars[sonar_source_host].sonar_plugins_hote }}"
+    p_centrale: "{{ hostvars[sonar_centrale_host].sonar_plugins_hote }}"
+  ansible.builtin.assert:
+    that:
+      - v_source == v_centrale
+      - p_source == p_centrale
+    fail_msg: >-
+      Gap detected between the two instances: source version={{ v_source }}
+      / central={{ v_centrale }}; identical plugins={{ p_source == p_centrale }}
+      (source={{ p_source }}, central={{ p_centrale }}). The instances are
+      supposed to be aligned (H5 of the design document): a gap here
+      signals a patch applied on only one side. Migration blocked.
+    success_msg: "Version and plugins strictly identical between the two instances."
+
+# --- Target project: blank, and source key free on the central instance -----
+# (Rechecked in addition to the authorization check: time may have passed
+# between the 'habiliter' job and this role's execution — the migration
+# window chosen by the central team.)
+
+- name: "Recheck the target project's state on the central instance"
+  when: inventory_hostname == sonar_centrale_host
+  block:
+    - name: "Look up the target project"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/rechercher_projet.yml"
+      vars:
+        sonar_cle_recherche: "{{ sonar_cle_cible }}"
+        sonar_recherche_nom: "Look up the target project"
+
+    - name: "Remember the target project lookup"
+      ansible.builtin.set_fact:
+        sonar_composants_cible: "{{ sonar_composants_trouves }}"
+
+    - name: "Look up a possible collision with the source key"
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/tasks/rechercher_projet.yml"
+      vars:
+        sonar_cle_recherche: "{{ sonar_cle_source }}"
+        sonar_recherche_nom: "Look up a possible collision with the source key"
+
+    - name: "Remember the collision lookup"
+      ansible.builtin.set_fact:
+        sonar_composants_collision: "{{ sonar_composants_trouves }}"
+
+    - name: "Check that the target project is still blank and the source key is still free"
+      vars:
+        composants_cible: "{{ sonar_composants_cible }}"
+        composants_collision: "{{ sonar_composants_collision }}"
+      ansible.builtin.assert:
+        that:
+          - composants_cible | length == 1
+          - composants_cible[0].lastAnalysisDate is not defined
+          - composants_collision | length == 0
+        fail_msg: >-
+          Target project state incompatible with continuing: found
+          {{ composants_cible | length }} project(s) for the target key (1
+          expected, blank), {{ composants_collision | length }} collision(s)
+          for the source key on the central instance (0 expected). The
+          authorization check had validated a different state: something
+          changed since. Contact the central team, do not insist.
+        success_msg: "Target project still blank, source key still free on the central instance."

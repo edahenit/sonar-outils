@@ -1,0 +1,15 @@
+---
+# Expected variables: sonar_cle_cible, sonar_run_id (extra-vars); sonar_url,
+# sonar_token, sonar_home (per host, central). sonar_echange_local
+# (group_vars/all.yml) gives the write location of the captured file.
+
+# SonarQube permission types covered by the capture. A fixed list rather
+# than dynamic discovery: these are the only documented types for
+# projects (admin already used and confirmed in shape by habilitation.py).
+sonar_types_permission:
+  - admin
+  - codeviewer
+  - issueadmin
+  - securityhotspotadmin
+  - scan
+  - user

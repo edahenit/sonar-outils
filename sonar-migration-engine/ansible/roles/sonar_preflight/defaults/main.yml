@@ -1,0 +1,10 @@
+---
+# Variables expected as pipeline extra-vars:
+#   sonar_cle_source, sonar_cle_cible : project keys (already validated on
+#     the Python side by the JSON schema — revalidated here out of caution,
+#     a role must never assume its caller did its job properly)
+#   sonar_source_host                  : Ansible host name of the source instance
+#
+# Supplied by group_vars/all.yml: sonar_espace_disque_minimum_mo, sonar_token
+# (per host, resolved by indirection — see that file).
+# Supplied by the dynamic inventory, per host: sonar_url, sonar_home.
