@@ -1,0 +1,140 @@
+{
+  "v2_enabled": true,
+  "tasks": [
+    {
+      "id": "T-OK-1",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:mon-projet",
+      "submitterLogin": "nom.prenom",
+      "submittedAt": "2026-08-25T09:12:03+0200",
+      "executedAt": "2026-08-25T09:12:41+0200"
+    },
+    {
+      "id": "T-NOLINK",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:sans-lien",
+      "submitterLogin": "nom.prenom",
+      "executedAt": "2026-08-25T09:13:00+0200"
+    },
+    {
+      "id": "T-BADHOST",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:mauvais-host",
+      "submitterLogin": "nom.prenom",
+      "executedAt": "2026-08-25T09:14:00+0200"
+    },
+    {
+      "id": "T-BADKEY",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:mauvaise-cle",
+      "submitterLogin": "nom.prenom",
+      "executedAt": "2026-08-25T09:15:00+0200"
+    },
+    {
+      "id": "T-LOCAL",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:compte-local",
+      "submitterLogin": "svc-technique",
+      "executedAt": "2026-08-25T09:16:00+0200"
+    },
+    {
+      "id": "T-NOFILE",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:archive-absente",
+      "submitterLogin": "nom.prenom",
+      "executedAt": "2026-08-25T09:17:00+0200"
+    },
+    {
+      "id": "T-ENC",
+      "type": "PROJECT_EXPORT",
+      "status": "SUCCESS",
+      "componentKey": "com.entite:cle-encodee",
+      "submitterLogin": "nom.prenom",
+      "executedAt": "2026-08-25T09:18:00+0200"
+    }
+  ],
+  "links": {
+    "com.entite:mon-projet": [
+      {
+        "id": "1",
+        "name": "Homepage",
+        "url": "https://wiki.corp/x"
+      },
+      {
+        "id": "2",
+        "name": "migration",
+        "url": "https://sonar-centrale.groupe.corp/dashboard?id=p-espace12-mapipeline&branch=main"
+      }
+    ],
+    "com.entite:sans-lien": [
+      {
+        "id": "3",
+        "name": "CI",
+        "url": "https://gitlab.corp/x"
+      }
+    ],
+    "com.entite:mauvais-host": [
+      {
+        "id": "4",
+        "name": "MIGRATION",
+        "url": "https://autre-sonar.corp/dashboard?id=p-espace12-autre"
+      }
+    ],
+    "com.entite:mauvaise-cle": [
+      {
+        "id": "5",
+        "name": "MIGRATION",
+        "url": "https://sonar-centrale.groupe.corp/dashboard?id=CLE_INVALIDE"
+      }
+    ],
+    "com.entite:compte-local": [
+      {
+        "id": "6",
+        "name": "MIGRATION",
+        "url": "https://sonar-centrale.groupe.corp/dashboard?id=p-espace12-local"
+      }
+    ],
+    "com.entite:archive-absente": [
+      {
+        "id": "7",
+        "name": "MIGRATION",
+        "url": "https://sonar-centrale.groupe.corp/dashboard?id=p-espace12-absent"
+      }
+    ],
+    "com.entite:cle-encodee": [
+      {
+        "id": "8",
+        "name": "  MIGRATION  ",
+        "url": "  https://sonar-centrale.groupe.corp/dashboard?id=p-espace99-mon%2Epipeline#coverage  "
+      }
+    ]
+  },
+  "users": [
+    {
+      "login": "nom.prenom",
+      "name": "Prenom NOM",
+      "email": "prenom.nom@entreprise.com",
+      "externalLogin": "u123456",
+      "externalProvider": "saml",
+      "local": false,
+      "managed": true,
+      "active": true
+    },
+    {
+      "login": "svc-technique",
+      "name": "Compte technique",
+      "email": null,
+      "externalLogin": "svc-technique",
+      "externalProvider": "sonarqube",
+      "local": true,
+      "managed": false,
+      "active": true
+    }
+  ]
+}

@@ -1,6 +1,0 @@
----
-# Expected variables: sonar_cle_source (extra-var); sonar_home, sonar_url
-# (current source host); sonar_centrale_host (group_vars); central
-# instance hostvars (sonar_home on the central side, via
-# hostvars[sonar_centrale_host]); sonar_utilisateur_service,
-# sonar_echange_local (group_vars).

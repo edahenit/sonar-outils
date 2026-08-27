@@ -1,3 +1,0 @@
----
-# Expected variables: sonar_cle_cible, sonar_run_id (extra-vars). Reads the
-# file written by sonar_capture_config (sonar_echange_local, group_vars).

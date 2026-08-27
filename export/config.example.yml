@@ -1,0 +1,65 @@
+# sonar-export-publisher — configuration
+# Copier vers /etc/sonar-export-publisher/config.yml puis chmod 640.
+
+sonarqube:
+  url: "https://sonar.entite.corp"
+
+  # Token d'un compte technique administrateur système.
+  # Préférer la variable d'environnement SONAR_TOKEN, injectée par systemd
+  # depuis un fichier séparé — voir INSTALL.md.
+  token: ""
+
+  # Édition de l'instance : community | developer | enterprise | datacenter
+  # Renseignée ici plutôt que déduite par API, pour éviter de dépendre d'un
+  # endpoint interne.
+  edition: "enterprise"
+
+  # Répertoire où SonarQube dépose les archives d'export.
+  export_dir: "/opt/sonarqube/data/governance/project_dumps/export"
+
+
+target:
+  # Host attendu dans le lien MIGRATION. Toute autre valeur est rejetée :
+  # c'est ce qui empêche de faire atterrir un import sur une instance tierce.
+  host: "sonar-centrale.groupe.corp"
+
+  # Format de la clé cible générée par le portail DevOps.
+  # Le groupe nommé (?P<espace_id>...) est obligatoire : il détermine le
+  # répertoire Artifactory de destination.
+  key_pattern: "^p-(?P<espace_id>[A-Za-z0-9]+)-(?P<pipeline>[A-Za-z0-9._-]+)$"
+
+
+link:
+  # Nom exact du lien à poser sur le projet source.
+  # Comparaison insensible à la casse.
+  name: "MIGRATION"
+
+
+artifactory:
+  base_url: "https://artifactory.groupe.corp/artifactory"
+  repository: "sonar-projects-to-migrate"
+
+  # Préférer la variable d'environnement ARTIFACTORY_TOKEN.
+  token: ""
+
+
+runtime:
+  state_file: "/var/lib/sonar-export-publisher/state.json"
+  quarantine_dir: "/var/lib/sonar-export-publisher/quarantine"
+  lock_file: "/var/lock/sonar-export-publisher.lock"
+
+  # Fenêtre de rattrapage. 24 h couvre un arrêt du service d'une journée
+  # sans dépendre de la purge de l'historique Compute Engine.
+  lookback_hours: 24
+
+  # Nombre de cycles avant mise en quarantaine d'une archive problématique.
+  # 6 cycles de 5 minutes = 30 minutes de tolérance.
+  max_attempts: 6
+
+  # Deux mesures de taille espacées de N secondes pour écarter les archives
+  # encore en cours d'écriture.
+  stability_check_seconds: 5
+
+  http_timeout_seconds: 30
+
+  log_level: "INFO"

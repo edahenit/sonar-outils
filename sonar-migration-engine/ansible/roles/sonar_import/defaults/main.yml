@@ -1,3 +1,0 @@
----
-# Expected variables: sonar_cle_source (extra-var — the import happens
-# UNDER the source key, the rename to the target key is the next step).

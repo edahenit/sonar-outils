@@ -1,9 +1,0 @@
-# One owner per entity folder: human review is an additional layer,
-# never the only one (see root README, § security). Each entity
-# designates its own approvers for its migration requests.
-#
-# Add one line per folder when onboarding a new entity, in the same
-# change as adding the instance to
-# sonar-migration-engine/inventaire/instances.yml.
-
-# requests/entite-exemple/  @groupe/entite-exemple/administrateurs-sonar

@@ -1,7 +1,0 @@
-version: 1
-instance_source: entite-alpha
-cle_source: com.alpha:facturation-api
-cle_cible: grp-alpha-facturation-api
-ticket: DEVOPS-1234
-fenetre_souhaitee: 2026-09-15
-commentaire: "Valid test request."

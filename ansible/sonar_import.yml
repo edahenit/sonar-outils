@@ -1,0 +1,22 @@
+---
+# Playbook appelé par le job template Ansible Tower « Sonar — Import projets ».
+#
+# Inventaire attendu : un groupe sonar_central_app contenant les DEUX nœuds
+# applicatifs de l'instance centrale.
+#
+# Les jetons arrivent par le type de credential personnalisé « Sonar Migration »,
+# qui les injecte comme variables d'environnement. Ils ne figurent nulle part
+# dans ce dépôt.
+
+- name: Import des projets SonarQube publiés dans Artifactory
+  hosts: sonar_central_app
+  become: true
+  become_user: sonarimp
+  gather_facts: false
+
+  # Un seul cycle à la fois. Le flock du worker protège déjà le nœud
+  # préparateur ; ceci protège l'orchestration elle-même.
+  serial: 0
+
+  roles:
+    - role: sonar_import

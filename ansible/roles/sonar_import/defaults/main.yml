@@ -1,0 +1,37 @@
+---
+# Rôle sonar_import — valeurs par défaut
+#
+# Le rôle orchestre trois phases sur un cluster SonarQube :
+#   1. --prepare  sur un seul nœud : contrôles, téléchargement, dépôt local
+#   2. transport  de l'archive vers les autres nœuds applicatifs
+#   3. --commit   sur ce même nœud : import, suppression, renommage
+#
+# La phase 2 existe parce que la tâche Compute Engine d'import est planifiée
+# sur un nœud imprévisible. L'archive doit donc être présente partout.
+
+# Emplacement du worker sur les nœuds Sonar.
+sonar_import_script: /opt/sonar-import-worker/sonar-import-worker.sh
+sonar_import_config: /etc/sonar-import-worker/config.sh
+sonar_import_work_dir: /var/lib/sonar-import-worker/work
+
+# Nœud qui pilote le cycle. Volontairement déterministe : on veut que le
+# journal Tower désigne toujours la même machine, pour que « où regarder »
+# ne soit jamais une question.
+sonar_import_primary: "{{ groups['sonar_central_app'] | sort | first }}"
+
+# Répertoire de transit sur le nœud d'exécution Tower.
+sonar_import_stage_dir: /tmp/sonar-import-transit
+
+# Propriétaire attendu du fichier déposé dans import/ : le process SonarQube
+# doit pouvoir le lire.
+sonar_import_file_owner: sonarqube
+sonar_import_file_group: sonarqube
+sonar_import_file_mode: "0640"
+
+# Mode de transport entre nœuds.
+#   via_tower     fetch vers le contrôleur puis copy vers les autres nœuds.
+#                 Aucune connectivité nœud-à-nœud requise — le choix par
+#                 défaut, le plus simple à faire homologuer.
+#   node_to_node  synchronize direct, plus rapide sur les gros dumps, mais
+#                 exige un flux SSH entre les nœuds applicatifs.
+sonar_import_transfer: via_tower

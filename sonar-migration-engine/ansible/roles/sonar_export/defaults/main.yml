@@ -1,4 +1,0 @@
----
-# Expected variables: sonar_cle_source (extra-var); sonar_url, sonar_home,
-# sonar_token (per host, source, via the dynamic inventory + indirection
-# from group_vars/all.yml).

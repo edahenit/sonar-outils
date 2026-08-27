@@ -1,0 +1,185 @@
+---
+# Un cycle d'import complet sur un cluster SonarQube.
+#
+# Invariant : rien n'est écrit sur l'instance tant que l'archive n'est pas
+# présente sur TOUS les nœuds applicatifs. La phase --prepare ne fait que
+# contrôler et déposer ; c'est --commit qui engage.
+
+- name: Cycle d'import
+  block:
+
+    # ----------------------------------------------------------------- #
+    #  Phase 1 — contrôles, téléchargement, dépôt local                  #
+    # ----------------------------------------------------------------- #
+
+    - name: Préparer le lot (contrôles, téléchargement, dépôt)
+      ansible.builtin.command:
+        argv:
+          - "{{ sonar_import_script }}"
+          - -c
+          - "{{ sonar_import_config }}"
+          - --prepare
+      environment:
+        SONAR_TOKEN: "{{ lookup('env', 'SONAR_TOKEN') }}"
+        ARTIFACTORY_TOKEN: "{{ lookup('env', 'ARTIFACTORY_TOKEN') }}"
+      register: sonar_import_prepare
+      changed_when: false
+      # 4 = un cycle est déjà en cours. Ce n'est pas une erreur : on sort.
+      failed_when: sonar_import_prepare.rc not in [0, 4]
+      run_once: true
+      delegate_to: "{{ sonar_import_primary }}"
+
+    - name: Signaler qu'un cycle est déjà en cours
+      ansible.builtin.debug:
+        msg: "Verrou tenu par un autre cycle — rien à faire."
+      when: sonar_import_prepare.rc == 4
+      run_once: true
+
+    - name: Lire le descripteur de travail
+      ansible.builtin.slurp:
+        src: "{{ sonar_import_work_dir }}/pending.json"
+      register: sonar_import_pending
+      run_once: true
+      delegate_to: "{{ sonar_import_primary }}"
+      when: sonar_import_prepare.rc == 0
+
+    - name: Extraire les projets préparés
+      ansible.builtin.set_fact:
+        sonar_import_items: >-
+          {{ (sonar_import_pending.content | b64decode | from_json).items | default([]) }}
+      when:
+        - sonar_import_prepare.rc == 0
+        - sonar_import_pending.content is defined
+
+    - name: Annoncer le lot
+      ansible.builtin.debug:
+        msg: >-
+          {{ sonar_import_items | length }} projet(s) à importer :
+          {{ sonar_import_items | map(attribute='target_key') | join(', ') }}
+      run_once: true
+      when: sonar_import_items | default([]) | length > 0
+
+    # ----------------------------------------------------------------- #
+    #  Phase 2 — l'archive doit exister sur TOUS les nœuds               #
+    # ----------------------------------------------------------------- #
+
+    - name: Garantir le répertoire d'import sur chaque nœud
+      ansible.builtin.file:
+        path: "{{ item.local_path | dirname }}"
+        state: directory
+        owner: "{{ sonar_import_file_owner }}"
+        group: "{{ sonar_import_file_group }}"
+        mode: "0750"
+      loop: "{{ sonar_import_items | default([]) }}"
+      loop_control:
+        label: "{{ item.target_key }}"
+
+    - name: Rapatrier l'archive vers le nœud d'exécution
+      ansible.builtin.fetch:
+        src: "{{ item.local_path }}"
+        dest: "{{ sonar_import_stage_dir }}/{{ item.source_key | replace(':', '_') }}.zip"
+        flat: true
+      loop: "{{ sonar_import_items | default([]) }}"
+      loop_control:
+        label: "{{ item.target_key }}"
+      run_once: true
+      delegate_to: "{{ sonar_import_primary }}"
+      when: sonar_import_transfer == 'via_tower'
+
+    - name: Déposer l'archive sur les autres nœuds applicatifs
+      ansible.builtin.copy:
+        src: "{{ sonar_import_stage_dir }}/{{ item.source_key | replace(':', '_') }}.zip"
+        dest: "{{ item.local_path }}"
+        owner: "{{ sonar_import_file_owner }}"
+        group: "{{ sonar_import_file_group }}"
+        mode: "{{ sonar_import_file_mode }}"
+      loop: "{{ sonar_import_items | default([]) }}"
+      loop_control:
+        label: "{{ item.target_key }}"
+      when:
+        - sonar_import_transfer == 'via_tower'
+        - inventory_hostname != sonar_import_primary
+
+    # rsync appelé directement plutôt que via ansible.posix.synchronize :
+    # cela évite d'imposer une collection pour un chemin optionnel, et sur un
+    # socle bancaire chaque dépendance supplémentaire est un dossier de plus.
+    - name: Répliquer l'archive de nœud à nœud
+      ansible.builtin.command:
+        argv:
+          - rsync
+          - --archive
+          - --checksum
+          - "{{ item.local_path }}"
+          - "{{ inventory_hostname }}:{{ item.local_path }}"
+      loop: "{{ sonar_import_items | default([]) }}"
+      loop_control:
+        label: "{{ item.target_key }}"
+      delegate_to: "{{ sonar_import_primary }}"
+      changed_when: true
+      when:
+        - sonar_import_transfer == 'node_to_node'
+        - inventory_hostname != sonar_import_primary
+
+    # Sans ce contrôle, un transport partiellement échoué mènerait à un import
+    # qui réussit ou échoue selon le nœud tiré au sort. On préfère refuser.
+    - name: Vérifier que l'archive est présente sur chaque nœud
+      ansible.builtin.stat:
+        path: "{{ item.local_path }}"
+      loop: "{{ sonar_import_items | default([]) }}"
+      loop_control:
+        label: "{{ item.target_key }}"
+      register: sonar_import_presence
+
+    - name: Refuser de continuer si un nœud n'a pas l'archive
+      ansible.builtin.assert:
+        that: >-
+          sonar_import_presence.results
+          | selectattr('stat.exists', 'equalto', false) | list | length == 0
+        fail_msg: >-
+          Archive absente sur {{ inventory_hostname }} — import non déclenché.
+          La tâche Compute Engine pourrait tomber sur ce nœud.
+      when: sonar_import_items | default([]) | length > 0
+
+    # ----------------------------------------------------------------- #
+    #  Phase 3 — l'engagement                                            #
+    # ----------------------------------------------------------------- #
+
+    - name: Valider le lot (import, suppression, renommage, reconfiguration)
+      ansible.builtin.command:
+        argv:
+          - "{{ sonar_import_script }}"
+          - -c
+          - "{{ sonar_import_config }}"
+          - --commit
+      environment:
+        SONAR_TOKEN: "{{ lookup('env', 'SONAR_TOKEN') }}"
+        ARTIFACTORY_TOKEN: "{{ lookup('env', 'ARTIFACTORY_TOKEN') }}"
+      register: sonar_import_commit
+      changed_when: sonar_import_commit.rc == 0
+      run_once: true
+      delegate_to: "{{ sonar_import_primary }}"
+      when: sonar_import_items | default([]) | length > 0
+
+  # ------------------------------------------------------------------- #
+  #  Nettoyage — succès comme échec                                      #
+  # ------------------------------------------------------------------- #
+  always:
+
+    # Artifactory reste la référence : les copies locales sont jetables.
+    # Les laisser traîner ferait monter le disque des nœuds sans que personne
+    # ne s'en aperçoive avant l'incident.
+    - name: Retirer l'archive de tous les nœuds
+      ansible.builtin.file:
+        path: "{{ item.local_path }}"
+        state: absent
+      loop: "{{ sonar_import_items | default([]) }}"
+      loop_control:
+        label: "{{ item.target_key }}"
+
+    - name: Vider le répertoire de transit
+      ansible.builtin.file:
+        path: "{{ sonar_import_stage_dir }}"
+        state: absent
+      delegate_to: localhost
+      run_once: true
+      become: false
